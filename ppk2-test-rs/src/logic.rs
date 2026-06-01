@@ -1,11 +1,14 @@
 //! Logic that gives context to measurements or instructs what is measured
 
-use std::{fmt::{self, Formatter}, ops::{BitAnd, BitOr, Not}};
+use std::{
+    fmt::{self, Formatter},
+    ops::{BitAnd, BitOr, Not},
+};
 
-use crate::{data::Sample, unit::Current};
+use crate::{data::Sample, unit::Ampere};
 use ppk2::types::{Level, LogicPortPins};
 use serde::{
-    Deserialize, Deserializer, Serialize, Serializer,
+    Deserialize, Deserializer,
     de::{Error, Visitor},
 };
 use std::iter::zip;
@@ -23,9 +26,9 @@ pub enum When {
     /// A mark has been identified via a pin configuration
     Logic(Pins),
     /// The Current is greater than a value
-    CurrentGt(Current),
+    CurrentGt(Ampere),
     /// The Current is less than a value
-    CurrentLt(Current),
+    CurrentLt(Ampere),
     /// Negates the predicate
     Not(Box<When>),
     /// Logical AND
@@ -157,17 +160,7 @@ impl ToString for Pins {
     }
 }
 
-/// Serializer for the string representation a section
-impl Serialize for Pins {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-/// Serializer for the string representation of a section
+/// Deserializer for the string representation of a section
 impl<'de> Deserialize<'de> for Pins {
     fn deserialize<D>(deserializer: D) -> Result<Pins, D::Error>
     where

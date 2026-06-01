@@ -32,7 +32,7 @@ use chrono::Local;
 use crate::{
     data::{Sample, Sections},
     logic::{MeasureStatus, Pins, When},
-    unit::Current,
+    unit::Ampere,
 };
 
 /// Macro to help with [Setup::flash]
@@ -110,7 +110,7 @@ impl Setup {
         //
         // In the case of the nRF52840 we measure negative current
         // when the power is not provided to the board.
-        self.wait_until(When::CurrentGt(Current::from_micros(0.0)));
+        self.wait_until(When::CurrentGt(Ampere::from_micros(0.0)));
 
         // We flash the device from the target directory and pipe stdout and
         // stderr of the child to capture it in the terminal.
@@ -185,7 +185,7 @@ impl Setup {
                     let sample = &Sample {
                         timestamp: timestamp_sample,
                         duration: duration_sample,
-                        current: Current::from_micros(m.micro_amps),
+                        current: Ampere::from_micros(m.micro_amps),
                         pins: Pins::from(m.pins),
                     };
 
@@ -255,7 +255,7 @@ impl Setup {
                     let sample = &Sample {
                         timestamp: timestamp_sample,
                         duration: duration_sample,
-                        current: Current::from_micros(m.micro_amps),
+                        current: Ampere::from_micros(m.micro_amps),
                         pins: Pins::from(m.pins),
                     };
                     Self::print_status(&Waiting, sample);

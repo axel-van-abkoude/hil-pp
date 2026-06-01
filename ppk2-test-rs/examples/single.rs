@@ -33,8 +33,5 @@ fn main() {
     setup.wait_until(Time(WARMUP) & Logic(all_low));
 
     // Measure from a non 0 pin configuration until 0 has been found
-    println!(
-        "{}",
-        setup.measure(!Logic(all_low), Logic(all_low))
-    );
+    println!("{}", setup.measure(!Logic(all_low), Logic(all_low)));
 }

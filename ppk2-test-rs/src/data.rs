@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize, ser::Serializer};
 
 use crate::{
     logic::Pins,
-    unit::{Capacity, Current},
+    unit::{Ampere, AmpereHour},
 };
 
 /// DATATYPES
@@ -25,21 +25,7 @@ pub struct Section {
     /// The total time spent in a section in the total timespan
     pub total_duration: Duration,
     /// The total capacity of a section in the total timespan
-    pub total_capacity: Capacity,
-}
-
-// MACROS
-
-macro_rules! write_arg {
-    ($f:expr, $label:expr, $arg:expr) => {{
-        write!(
-            $f,
-            "{}:{:>width$}",
-            $label,
-            $arg,
-            width = $f.width().unwrap_or(30) - $label.chars().count() - 1,
-        )
-    }};
+    pub total_capacity: AmpereHour,
 }
 
 // IMPLS
@@ -49,21 +35,21 @@ impl From<Pins> for Section {
         Section {
             pins: value,
             total_duration: Duration::ZERO,
-            total_capacity: Capacity::ZERO,
+            total_capacity: AmpereHour::ZERO,
         }
     }
 }
 
 impl Display for Section {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write_arg!(
+        writeln!(
             f,
-            "| section",
-            String::new() + "(" + &u8::from(self.pins).to_string() + ") " + &self.pins.to_string()
+            "| {:<3} | {:8} | {:>32} | {:>28} µAh |",
+            u8::from(self.pins),
+            self.pins.to_string(),
+            self.total_duration.as_micros(),
+            self.total_capacity.as_micros()
         )?;
-        write_arg!(f, " | µs", self.total_duration.as_micros())?;
-        write_arg!(f, " | µAh", self.total_capacity.as_micros())?;
-        writeln!(f, "|")?;
         Ok(())
     }
 }
@@ -87,24 +73,27 @@ pub struct Sections([Section; 256]);
 
 impl Display for Sections {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{}", "=".repeat(91))?;
+        writeln!(f, "{}", "=".repeat(88))?;
         for section in self.0.iter() {
             match *section {
                 Section {
                     pins: _,
                     total_duration: Duration::ZERO,
-                    total_capacity: Capacity::ZERO,
+                    total_capacity: AmpereHour::ZERO,
                 } => continue,
                 s => {
                     write!(f, "{}", s)?;
                 }
             }
         }
-        writeln!(f, "|{}|", "-".repeat(89))?;
-        write_arg!(f, "| Total Measurement", "")?;
-        write_arg!(f, " | µs", self.total_duration().as_micros())?;
-        write_arg!(f, " | µAh", self.total_capacity())?;
-        writeln!(f, "|\n{}", "=".repeat(91))?;
+        writeln!(f, "|{}|", "-".repeat(86))?;
+        writeln!(
+            f,
+            "| Total:         | {:>29} µs | {:>32} |",
+            self.total_duration().as_micros(),
+            self.total_capacity().pretty()
+        )?;
+        writeln!(f, "{}", "=".repeat(88))?;
         Ok(())
     }
 }
@@ -116,7 +105,7 @@ impl Sections {
     }
 
     /// Returns the total capacity of all sections combined
-    pub fn total_capacity(mut self) -> Capacity {
+    pub fn total_capacity(mut self) -> AmpereHour {
         self.0
             .iter_mut()
             .reduce(|acc, section| {
@@ -143,9 +132,8 @@ impl Sections {
     pub fn update_with(&mut self, measurement: Measurement, duration: Duration) {
         let section = &mut self[Pins::from(measurement.pins)];
 
-        // µA * µs = A*s*(µ^2)
-        // h:  sec / 60^2
-        section.total_capacity += measurement.micro_amps * (duration.as_micros() as f32);
+        section.total_capacity +=
+            AmpereHour::from(Ampere::from_micros(measurement.micro_amps), duration);
         section.total_duration += duration;
     }
 }
@@ -166,16 +154,32 @@ pub struct Sample {
     #[allow(missing_docs)]
     pub duration: Duration,
     #[serde(rename = "Current Sample (μA)")]
+    #[serde(serialize_with = "ser_ampere_micros")]
     #[allow(missing_docs)]
-    pub current: Current,
+    pub current: Ampere,
     #[serde(rename = "Logic Pins Sample (D0-D7)")]
+    #[serde(serialize_with = "ser_pins_str")]
     #[allow(missing_docs)]
     pub pins: Pins,
 }
 
-fn ser_duration_micros<S>(d: &Duration, s: S) -> Result<S::Ok, S::Error>
+fn ser_duration_micros<S>(duration: &Duration, s: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    s.serialize_u64(d.as_micros() as u64)
+    s.serialize_f32(duration.as_micros() as f32)
+}
+
+fn ser_ampere_micros<S>(current: &Ampere, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    s.serialize_f32(current.as_micros())
+}
+
+fn ser_pins_str<S>(pins: &Pins, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    s.serialize_str(&pins.to_string())
 }
