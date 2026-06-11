@@ -2,11 +2,11 @@
 //! An example that flashes the device with an experiment.
 //!
 
-use ppk2_test_rs::Setup;
+use ate_ppk2::Setup;
 use std::{path::Path, process::Command};
 
 const EXPERIMENT: &str = "pin_influence";
-const PATH: &str = "../experiments";
+const PATH: &str = "../dut_nrf52840";
 
 fn main() {
     let mut setup = Setup::find();

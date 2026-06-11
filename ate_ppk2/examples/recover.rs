@@ -7,7 +7,7 @@
 //! https://docs.nordicsemi.com/bundle/nrfutil/page/guides/installing.html
 //!
 
-use ppk2_test_rs::Setup;
+use ate_ppk2::Setup;
 use std::{io::stdin, path::Path, process::Command};
 
 /// Traits to filter devices on
