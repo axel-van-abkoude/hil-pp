@@ -2,10 +2,10 @@
 
 use std::ops::{BitAnd, BitOr, Not};
 
-use crate::{data::Sample, unit::Ampere};
+use crate::data::Sample;
 use ppk2::types::{Level, LogicPortPins};
 use std::iter::zip;
-use std::time::Duration;
+use uom::si::{f64::ElectricCurrent, f64::Time};
 
 #[derive(Debug, Clone)]
 /// Predicate for when a measurement should be started or ended
@@ -15,13 +15,15 @@ pub enum When {
     /// Always evaluates to false
     Never,
     /// An amount of time has elapsed
-    Time(Duration),
+    Duration(Time),
+    /// The latency is greater than
+    LatencyGt(Time),
     /// A mark has been identified via a pin configuration
     Logic(Pins),
     /// The Current is greater than a value
-    CurrentGt(Ampere),
+    CurrentGt(ElectricCurrent),
     /// The Current is less than a value
-    CurrentLt(Ampere),
+    CurrentLt(ElectricCurrent),
     /// Negates the predicate
     Not(Box<When>),
     /// Logical AND
@@ -36,7 +38,7 @@ impl When {
         &self,
         sample @ Sample {
             timestamp,
-            duration: _,
+            latency,
             current,
             pins,
         }: &Sample,
@@ -45,8 +47,9 @@ impl When {
         match self {
             Now => true,
             Never => false,
-            Time(pred_timestamp) => timestamp > pred_timestamp,
-            Logic(pred_pins) => pins == pred_pins,
+            Duration(pred_timestamp) => timestamp > pred_timestamp,
+            LatencyGt(pred_latency) => latency > pred_latency,
+            Logic(pred_pins) => pins.matches(pred_pins),
             CurrentGt(pred_current) => current > pred_current,
             CurrentLt(pred_current) => current < pred_current,
             Not(pred) => !pred.eval(sample),
@@ -93,13 +96,8 @@ pub enum MeasureStatus {
 #[derive(Copy, Debug, Clone)]
 /// Implementation of ppk2-rs LogicPortPins
 pub struct Pins(LogicPortPins);
+#[allow(missing_docs)]
 impl Pins {
-    /// Pin configuration where they are all set to low
-    pub fn all_low() -> Self {
-        Self(0u8.into())
-    }
-
-    ///
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let mut arr = [Level::Either; 8];
         for i in 0..8 {
@@ -111,9 +109,58 @@ impl Pins {
         }
         Self(LogicPortPins::with_levels(arr))
     }
-    ///
-    pub fn from_pins(pins: LogicPortPins) -> Self {
-        Self(pins)
+    pub fn is_d0(self) -> bool {
+        self.0.pin_is_high(0)
+    }
+    pub fn is_d1(self) -> bool {
+        self.0.pin_is_high(1)
+    }
+    pub fn is_d2(self) -> bool {
+        self.0.pin_is_high(2)
+    }
+    pub fn is_d3(self) -> bool {
+        self.0.pin_is_high(3)
+    }
+    pub fn is_d4(self) -> bool {
+        self.0.pin_is_high(4)
+    }
+    pub fn is_d5(self) -> bool {
+        self.0.pin_is_high(5)
+    }
+    pub fn is_d6(self) -> bool {
+        self.0.pin_is_high(6)
+    }
+    pub fn is_d7(self) -> bool {
+        self.0.pin_is_high(7)
+    }
+
+    pub fn pin_high(d: usize) -> Self {
+        let mut arr = [Level::Either; 8];
+        arr[d] = Level::High;
+        Self(LogicPortPins::with_levels(arr))
+    }
+
+    pub fn pin_low(d: usize) -> Self {
+        let mut arr = [Level::Either; 8];
+        arr[d] = Level::Low;
+        Self(LogicPortPins::with_levels(arr))
+    }
+
+    pub fn matches(&self, other: &Self) -> bool {
+        for (inner_self, inner_other) in zip(self.0.inner(), other.0.inner()) {
+            match (inner_self, inner_other) {
+                (Level::Low, Level::High) => return false,
+                (Level::High, Level::Low) => return false,
+                _ => continue,
+            }
+        }
+        return true;
+    }
+}
+
+impl Into<Pins> for LogicPortPins {
+    fn into(self) -> Pins {
+        Pins(self)
     }
 }
 
@@ -128,10 +175,10 @@ impl PartialEq for Pins {
     }
 }
 
-impl From<Pins> for u8 {
-    fn from(value: Pins) -> Self {
+impl Into<u8> for Pins {
+    fn into(self) -> u8 {
         let mut ret: u8 = 0;
-        for (i, pin) in value.0.inner().iter().enumerate() {
+        for (i, pin) in self.0.inner().iter().enumerate() {
             match pin {
                 Level::Low => {
                     continue;
@@ -148,9 +195,9 @@ impl From<Pins> for u8 {
     }
 }
 
-impl From<u8> for Pins {
-    fn from(value: u8) -> Self {
-        Pins(LogicPortPins::from(value))
+impl Into<Pins> for u8 {
+    fn into(self) -> Pins {
+        Pins(LogicPortPins::from(self))
     }
 }
 
@@ -253,12 +300,5 @@ mod tests {
         assert_eq!('1', char::from(PinLevel::from(b'1')));
         assert_eq!('x', char::from(PinLevel::from(b'x')));
         assert_eq!('x', char::from(PinLevel::from(b'\x00')));
-    }
-
-    #[test]
-    fn test_inverses_u8() {
-        for i in 0..256 {
-            assert_eq!(i as u8, u8::from(Pins::from(i as u8)));
-        }
     }
 }

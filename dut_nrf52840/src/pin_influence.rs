@@ -41,7 +41,6 @@ async fn main(_spawner: Spawner) -> ! {
     ];
 
     let mut button1 = Input::new(p.P0_11, Pull::Up);
-    // Use embassy_time::Ticker
     let duration = Duration::from_millis(10);
 
     loop {
@@ -58,7 +57,6 @@ async fn main(_spawner: Spawner) -> ! {
                 37 => Timer::after(Duration::from_millis(200)).await,
                 _ => Timer::after(duration).await,
             }
-
         }
 
         // Resets to all 0s

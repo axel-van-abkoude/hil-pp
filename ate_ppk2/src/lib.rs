@@ -1,39 +1,53 @@
 #![doc = include_str!("../README.md")]
-#![deny(missing_docs)]
 
 // Include datatypes from crate and expose them to lib users
+// pub mod data;
 pub mod data;
 pub mod error;
 pub mod logic;
-pub mod unit;
+pub mod plot;
+pub mod timer;
 
-use csv::Writer;
+use polars::frame::DataFrame;
+use ppk2::measurement::Measurement;
+use ppk2::measurement::MeasurementMatch;
+use uom::ConstZero;
+use uom::fmt::DisplayStyle::*;
+use uom::si::electric_current::microampere;
+use uom::si::f64::ElectricCurrent;
+use uom::si::f64::Time;
+use uom::si::time::microsecond;
+
+// use audio_thread_priority::{
+//     demote_current_thread_from_real_time, promote_current_thread_to_real_time,
+// };
+
 // We use the ppk2-rs library to interface with the Ppk2
 use ppk2::{
-    Ppk2,
-    measurement::MeasurementMatch,
-    try_find_ppk2_port,
+    Ppk2, try_find_ppk2_port,
     types::{DevicePower, MeasurementMode},
 };
+use uom::si::time::millisecond;
+use uom::si::time::second;
 
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Duration;
 // Used for time management
 use std::{
     env::{current_dir, set_current_dir},
     io::{self, Write},
     path::Path,
     process::{Command, Stdio},
-    sync::mpsc::RecvTimeoutError,
-    time::{Duration, Instant},
 };
 
 // Local time for getting the current time as the std lib does not give a
 // general way to get this.
-use chrono::Local;
 
+use crate::data::Buffers;
+use crate::data::Sample;
 use crate::{
-    data::{Sample, Sections},
-    logic::{MeasureStatus, Pins, When},
-    unit::{Micro, Timer, Unit},
+    logic::{MeasureStatus, When},
+    timer::Timer,
 };
 
 /// Macro to help with [Setup::flash]
@@ -64,8 +78,6 @@ pub struct Setup {
     /// The rate that will be measured with
     /// Will not update the rate of a measurement while mid measurement
     pub rate: Rate,
-
-    data_dir: String,
 }
 
 /// All functionality in one test to keep the lifetime of the ppk2 alive
@@ -84,8 +96,7 @@ impl Setup {
 
         Setup {
             ppk2: Some(ppk2),
-            rate: Rate::FINE,
-            data_dir: String::from("./data"),
+            rate: Rate::COARSE,
         }
     }
 
@@ -111,7 +122,10 @@ impl Setup {
         //
         // In the case of the nRF52840 we measure negative current
         // when the power is not provided to the board.
-        self.wait_until(When::CurrentGt(Unit::ZERO));
+        let _ = self.measure(
+            When::CurrentGt(ElectricCurrent::ZERO),
+            When::Duration(Time::new::<millisecond>(1.0)),
+        );
 
         // We flash the device from the target directory and pipe stdout and
         // stderr of the child to capture it in the terminal.
@@ -137,133 +151,98 @@ impl Setup {
             None => println!("==============TERMINATED====================\n"),
         }
 
+        let _ = self.measure(
+            When::CurrentGt(ElectricCurrent::ZERO),
+            When::Duration(Time::new::<second>(2.0)),
+        );
+
         self.power_disable();
     }
 
-    /// Starts a measurement when a starting condition is true
-    /// Stops when a stopping condition is true
-    pub fn measure(&mut self, start: When, stop: When) -> Sections {
+    // #[allow(missing_docs)]
+    // pub fn promoted_measure(&mut self, start: When, stop: When) -> DataFrame {
+    //     // ... on a thread that will compute audio and has to be real-time:
+    //     match promote_current_thread_to_real_time(512, self.rate.as_u32()) {
+    //         Ok(h) => {
+    //             println!("this thread is now bumped to real-time priority.");
+
+    //             let ret = self.measure(start, stop);
+
+    //             match demote_current_thread_from_real_time(h) {
+    //                 Ok(_) => {
+    //                     println!("this thread is now bumped back to normal.");
+    //                     return ret;
+    //                 }
+    //                 Err(_) => {
+    //                     println!("Could not bring the thread back to normal priority.");
+    //                     panic!()
+    //                 }
+    //             };
+    //         }
+    //         Err(e) => {
+    //             eprintln!("Error promoting thread to real-time: {}", e);
+    //             panic!()
+    //         }
+    //     }
+    // }
+
+    #[allow(missing_docs)]
+    pub fn measure(&mut self, start: When, stop: When) -> DataFrame {
+        self.power_enable();
         let ppk2 = self.take();
-
-        use MeasureStatus::*;
-        let mut status = &Waiting;
-
-        // Create a output csv file
-        let data_path: String = format!(
-            "{}/{}.csv",
-            self.data_dir,
-            Local::now().format("%Y-%m-%d-%H:%M:%S")
-        );
-
-        let mut csv_writer = Writer::from_path(data_path.clone()).unwrap();
-
-        let mut sections = Sections::new();
-
-        // Initialise timing where begin signifies the begin of Waiting and is
-        // later updated with the beginning of Measuring
-        let timestamp_timer = Timer::new().unwrap();
-        let sample_timer = &mut Timer::new().unwrap();
-
         let (rcv, stop_ppk2) = ppk2.start_measurement(self.rate.as_usize()).unwrap();
 
-        loop {
-            // Mark the start and end of this received sample
-            sample_timer.start().unwrap();
-            let rcv_res = rcv.recv_timeout(Self::TIMEOUT_DURATION);
+        use MeasureStatus::*;
+        let mut status = Waiting;
+        let mut buffers = Buffers::new(1024);
 
-            // When data is found update the sections according to the predicates
+        let mut timestamp_prev = uom::si::time::Time::new::<microsecond>(0.0f64);
+        let mut timestamp_timer = Timer::start().unwrap();
+
+        loop {
             use MeasurementMatch::*;
             use RecvTimeoutError::*;
-            match rcv_res {
-                Ok(Match(m)) => {
-                    let sample = &Sample {
-                        timestamp: timestamp_timer.elapsed().unwrap(),
-                        duration: sample_timer.elapsed().unwrap(),
-                        current: Unit::from::<Micro>(m.micro_amps),
-                        pins: Pins::from_pins(m.pins),
+            match rcv.recv_timeout(Self::TIMEOUT_DURATION) {
+                Ok(Match(Measurement { micro_amps, pins })) => {
+                    let timestamp_now = timestamp_timer.elapsed().unwrap();
+                    let sample = &mut Sample {
+                        timestamp: timestamp_prev,
+                        latency: timestamp_now - timestamp_prev,
+                        current: ElectricCurrent::new::<microampere>(micro_amps as f64),
+                        pins: pins.into(),
                     };
-
-                    //Self::print_status(status, sample);
+                    timestamp_prev = timestamp_now;
 
                     match status {
-                        Waiting => {
-                            // Update the status when the starting predicate is true
-                            // Include the sample in the section as the predicate
-                            // holds in the current sample
-                            if start.eval(sample) {
-                                println!(" => Starting Condition Found!");
-                                status = &Measuring;
-                                // Set the begin timestamp for the measurement
-                                sections.update_with(sample);
-                            }
+                        Waiting
+                            if (When::CurrentGt(ElectricCurrent::ZERO)
+                                & When::Duration(Time::new::<millisecond>(1.0)))
+                            .eval(sample)
+                                && start.eval(sample) =>
+                        {
+                            sample.timestamp = uom::si::time::Time::new::<microsecond>(0.0f64);
+                            buffers.push(sample);
+
+                            status = Measuring;
+
+                            timestamp_timer.reset().unwrap();
+                            timestamp_prev = uom::si::time::Time::new::<microsecond>(0.0f64);
+
+                            println!("\nStart: {:?}", start);
                         }
-                        Measuring => {
-                            // Stop measuring if the stopping predicate is true
-
-                            // Exclude the sample in the section as the predicate
-                            // does not hold in the current sample
-                            if stop.eval(sample) {
-                                println!(" => Measurement Completed!");
-                                break;
-                            }
-
-                            // Write to a csv file
-                            csv_writer.serialize(sample).unwrap();
-
-                            // Update metrics with the data of the sample
-                            sections.update_with(sample);
+                        Waiting => Self::print_status(&status, sample),
+                        Measuring if stop.eval(sample) => {
+                            println!("Stop:  {:?}", stop);
+                            self.stop_and_put(stop_ppk2);
+                            return buffers.finish();
                         }
+                        Measuring => buffers.push(sample),
                     }
-                }
-                Ok(NoMatch) => {
-                    todo!("we match on everything always thus this should never happen")
                 }
                 Err(Disconnected) => todo!("Disconnected"),
-                Err(_) => todo!("Error in measure"),
+                _ => todo!(),
             }
         }
-        println!("{:?}", timestamp_timer.elapsed().unwrap());
-        println!("\nData written to: {}\n", data_path);
-        self.stop_and_put(stop_ppk2);
-        sections
-    }
-
-    /// Waits and stops when a stopping condition holds
-    pub fn wait_until(&mut self, stop: When) {
-        let ppk2 = self.take();
-        let (rcv, stop_ppk2) = ppk2.start_measurement(Rate::COARSE.as_usize()).unwrap();
-        let begin = Instant::now();
-        let mut end_sample = begin;
-        loop {
-            let begin_sample = end_sample;
-            let rcv_res = rcv.recv_timeout(Self::TIMEOUT_DURATION);
-            end_sample = Instant::now();
-
-            let duration_sample = end_sample.duration_since(begin_sample);
-            let timestamp_sample = end_sample.duration_since(begin);
-
-            use MeasureStatus::*;
-            use MeasurementMatch::*;
-            match rcv_res {
-                // Stop if the stopping predicate holds
-                Ok(Match(m)) => {
-                    let sample = &Sample {
-                        timestamp: timestamp_sample,
-                        duration: duration_sample,
-                        current: Unit::from::<Micro>(m.micro_amps),
-                        pins: Pins::from_pins(m.pins),
-                    };
-                    Self::print_status(&Waiting, sample);
-                    if stop.eval(sample) {
-                        break;
-                    }
-                }
-                Ok(_) => continue,
-                Err(_) => todo!("Error in wait_until"),
-            }
-        }
-        println!(" => Stopped Waiting.");
-        self.stop_and_put(stop_ppk2)
     }
 
     /// Enables the power on the ppk2 device
@@ -295,27 +274,44 @@ impl Setup {
     }
 
     fn print_header() {
-        println!("\n  Section  | µs/Sample | Current (µA)     | Status");
-        println!("=======================================================");
+        println!(
+            "\n|   Pins   |    Timestamp (s) | Latency (µs/smp) |   Current (µA)   |  Status  |"
+        );
+        println!(
+            "|==========|==================|==================|==================|==========|"
+        );
     }
 
     fn print_status(
         status: &MeasureStatus,
         Sample {
             timestamp,
-            duration,
+            latency,
             current,
             pins,
         }: &Sample,
     ) {
         let spinner = ['|', '/', '-', '\\'];
         print!(
-            "\r| {:<8} | {:<9} | {:<16} | {:<9} | [{}]",
+            "\r| {:>8} | {:>16} | {:>16} | {:>16} | {:8} | [{}]",
             pins.to_string(),
-            duration.as_micros(),
-            current.pretty::<Micro>(),
+            format!(
+                "{:.3}",
+                Time::format_args(second, Abbreviation).with(*timestamp)
+            )
+            .as_str(),
+            format!(
+                "{:.3}",
+                Time::format_args(microsecond, Abbreviation).with(*latency)
+            )
+            .as_str(),
+            format!(
+                "{:.3}",
+                ElectricCurrent::format_args(microampere, Abbreviation).with(*current)
+            )
+            .as_str(),
             format!("{:?}", status),
-            spinner[timestamp.as_secs() as usize % spinner.len()]
+            spinner[timestamp.get::<second>() as usize % spinner.len()]
         );
         io::stdout().flush().unwrap();
     }

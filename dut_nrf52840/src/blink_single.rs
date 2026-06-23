@@ -28,4 +28,3 @@ async fn main(_spawner: Spawner) -> ! {
         ticker.next().await;
     }
 }
-

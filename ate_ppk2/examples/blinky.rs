@@ -3,30 +3,29 @@
 //! measurement rates.
 //!
 
-use ate_ppk2::{
-    Setup, data::Sections, logic::When::*, unit::{Micro, Unit}
-};
-use std::{fs::File, io::{Result, Write}, path::Path, process::Command, time::Duration};
+use ate_ppk2::{Setup, data::*, logic::When::*, plot::Plot};
+use std::{io::Result, path::Path, process::Command};
+use uom::si::time::{Time, millisecond, second};
 
 const PATH: &str = "../dut_nrf52840";
-const WARMUP: Duration = Duration::from_secs(1);
-const DURATION: Duration = Duration::from_secs(10);
 
 fn main() -> Result<()> {
-    let single = run_experiment(PATH, "blink_single")?;
-    let all = run_experiment(PATH, "blink_all")?;
-    let wait = run_experiment(PATH, "wait")?;
+    let all = run_experiment("blink_all")?;
+    let single = run_experiment("blink_single")?;
+    let wait = run_experiment("wait")?;
+    println!("{}", all);
+    println!("{}", single);
+    println!("{}", wait);
     Ok(())
 }
 
-fn run_experiment(path: &'static str, experiment: &'static str) -> Result<Sections> {
-
-    let mut file = File::create(format!("blinky_{}.txt", experiment))?;
+fn run_experiment(experiment: &'static str) -> Result<Metrics<Current>> {
+    let path = format!("plots/{}.png", experiment);
     let mut setup = Setup::find();
 
     // Flash device
     setup.flash(
-        Path::new(path),
+        Path::new(PATH),
         Command::new("cargo")
             .arg("flash")
             .arg("--chip")
@@ -35,12 +34,16 @@ fn run_experiment(path: &'static str, experiment: &'static str) -> Result<Sectio
             .arg("--bin")
             .arg(experiment),
     );
-    setup.power_enable();
 
-    let sections = setup.measure(Time(WARMUP), Time(DURATION));
-    file.write_fmt(format_args!("{}", sections))?;
+    let df = setup.measure(
+        Duration(Time::new::<millisecond>(1.0f64)),
+        Duration(Time::new::<second>(1.0f64)),
+    );
 
-    println!("{}:\n {:?}\n {}", experiment, sections.total_duration(), sections.total_capacity().pretty::<Micro>());
-
-    Ok(sections)
+    let mut plot = Plot::<Timestamp, Current>::new(&df, Path::new(path.as_str()));
+    for i in 0u8..=255u8 {
+        plot.draw(i);
+    }
+    plot.present();
+    Ok(Metrics::<Current>::new(&df))
 }
